@@ -14,13 +14,16 @@ OAUTH_TOKEN = os.getenv('OAUTH_TOKEN')
 # this is the project ID for web-bugs rotation project
 # see https://developer.github.com/v3/projects/
 PROJECT_ID = os.getenv('PROJECT_ID')
-COLUMNS = [
-    '5301985',  # karl
-    '5051659',  # dennis
-    '5051665',  # ksenia
-    # 7064653, # mike
-    # 5051664, # tom
-]
+# Python weekday
+# Monday: 0 to Sunday: 6
+# Saturday: 5, Sunday: 6 are not working days
+# Add the forbidden days of the week.
+COLUMNS = {
+    '5301985': {'name': 'karl', 'avoid': 1},
+    '5051659': {'name': 'dennis', 'avoid': None},
+    '5051665': {'name': 'ksenia', 'avoid': None},
+    '5051664': {'name': 'thomas', 'avoid': None},
+}
 
 HEADERS = {
     'Authorization': 'token {0}'.format(OAUTH_TOKEN),
@@ -33,54 +36,95 @@ HEADERS = {
 # to get the ID, then we have to get column keys from that.
 # curl -H "Accept: application/vnd.github.inertia-preview+json" -H "Authorization: token OAUTH_TOKEN_HERE" https://api.github.com/projects/4032465/columns
 
-# Here's a horrible global variable
-first = False
-# TODO: make a generator that returns the next working day
-# then we can skip this global crap
-
-
 @click.command()
 @click.option('--firstdate', prompt='The first weekday to start with',
               help='The first weekday to start with. Format: YYYY-MM-DD')
 def make_cards(firstdate):
-    """Takes the first date and makes a set of cards for each given column."""
+    """
+    Create rotation cards starting at a specific date.
+
+    rotations: 2 is the default.
+    The rotations is the number of times one individual will do rotations.
+    """
     click.echo("OK, making cards starting with {0}".format(firstdate))
-    global first
-    if not first:
-        first = firstdate
-    for column in COLUMNS:
-        create_card(get_two(first), column)
+    days_cards = create_rotation_days(firstdate, rotations=2)
+    for card in days_cards:
+        create_card(card)
 
 
-def get_next_workday(today, set_global=True):
-    tomorrow = today + datetime.timedelta(days=1)
-    if tomorrow.isoweekday() in set((6, 7)):
-        tomorrow += datetime.timedelta(days=8 - tomorrow.isoweekday())
-    if set_global:
-        global first
-        first = get_next_workday(tomorrow, False).strftime('%Y-%m-%d')
-    return tomorrow
+def create_rotation_days(firstdate, rotations):
+    """
+    Create a list of rotation days to create as card.
+
+    The format is:
+    [(person_name, column_id, day_1, day_2), …]
+    """
+    days_card = []
+    start_date = get_start_date(firstdate)
+    working_days = build_workdays(start_date, rotations)
+    while working_days:
+        for person in COLUMNS:
+            # First day
+            first_day = working_days[0]
+            if first_day.weekday() == COLUMNS[person]['avoid']:
+                first_day = working_days[1]
+                working_days.pop(1)
+                next_day = working_days[1]
+                working_days.pop(1)
+            else:
+                working_days.pop(0)
+                next_day = working_days[0]
+                working_days.pop(0)
+            card = (COLUMNS[person]['name'], person, first_day, next_day)
+            days_card.append(card)
+    return days_card
 
 
-def get_two(firstdate):
-    """Return the 2 days we want to create assignments for, as a tuple."""
+def get_start_date(firstdate):
+    """Return the first date."""
     try:
         day = datetime.datetime.strptime(firstdate, '%Y-%m-%d')
     except ValueError:
         raise ValueError("Incorrect firstdate format, should be YYYY-MM-DD")
-    return (day.strftime('%a, %b %d'),
-            get_next_workday(day).strftime('%a, %b %d'))
+    return day
 
 
-def create_card(date_tuple, column_id):
+def build_workdays(start_date, rotations):
+    """Return a list of days for the number of rotation next valid day."""
+    # How many participants, 2 days by participants, nb of rotations
+    nb_days = len(COLUMNS) * 2 * rotations
+    day_counter = nb_days - 1
+    day = start_date
+    business_days = [start_date]
+    while day_counter > 0:
+        gap = nb_days - day_counter
+        day = get_next_workday(day)
+        business_days.append(day)
+        day_counter -= 1
+    return business_days
+
+
+def get_next_workday(day):
+    """Get the next valid day of work."""
+    if day.weekday() == 4:
+        # Friday
+        next_day = day + datetime.timedelta(days=3)
+    else:
+        next_day = day + datetime.timedelta(days=1)
+    return next_day
+
+
+def create_card(card):
     """Make the GitHub request to create the card.
     POST /projects/columns/:column_id/cards
     params: note (string)
     """
+    name, column_id, day_1, day_2 = card
+    day_1_str = day_1.strftime('%a, %b %d')
+    day_2_str = day_2.strftime('%a, %b %d')
+    full_body = f"* [ ] {day_1_str}\n* [ ] {day_2_str}"
     uri = 'https://api.github.com/projects/columns/{0}/cards'.format(
         column_id)
-    full_body = '* [ ] {0}\n* [ ] {1}'.format(*date_tuple)
-
     rv = requests.post(uri, data=json.dumps(
         {"note": full_body}), headers=HEADERS)
     click.echo(rv.status_code)
